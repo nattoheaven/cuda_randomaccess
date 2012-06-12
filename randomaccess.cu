@@ -101,7 +101,7 @@ union benchtype {
   uint2 u32;
 };
 
-static __constant__ uint64_t c_m2[64];
+static __device__ uint64_t c_m2[64];
 static __device__ uint32_t d_error[1];
 
 static __global__ void
@@ -120,17 +120,12 @@ d_starts(size_t n)
     return 1;
   }
 
-  ptrdiff_t i;
-  for (i = 63; i >= 0; --i) {
-    if ((n >> i) & 1) {
-      break;
-    }
-  }
+  int i = 63 - __clzll(n);
 
   uint64_t ran = 2;
   while (i > 0) {
     uint64_t temp = 0;
-    for (ptrdiff_t j = 0; j < 64; j++) {
+    for (int j = 0; j < 64; j++) {
       if ((ran >> j) & 1) {
         temp ^= c_m2[j];
       }
@@ -145,7 +140,13 @@ d_starts(size_t n)
   return ran;
 }
 
-static __global__ void
+enum atomictype_t {
+  ATOMICTYPE_CAS,
+  ATOMICTYPE_XOR,
+};
+
+template<atomictype_t ATOMICTYPE>
+__global__ void
 d_bench(size_t n, benchtype *t)
 {
   size_t num_threads = gridDim.x * blockDim.x;
@@ -156,8 +157,21 @@ d_bench(size_t n, benchtype *t)
   ran.u64 = d_starts(start);
   for (ptrdiff_t i = start; i < end; ++i) {
     ran.u64 = (ran.u64 << 1) ^ ((int64_t) ran.u64 < 0 ? POLY : 0);
-    atomicXor(&t[ran.u64 & (n - 1)].u32.x, ran.u32.x);
-    atomicXor(&t[ran.u64 & (n - 1)].u32.y, ran.u32.y);
+    switch (ATOMICTYPE) {
+    case ATOMICTYPE_CAS:
+      unsigned long long int *address, old, assumed;
+      address = (unsigned long long int *)&t[ran.u64 & (n - 1)].u64;
+      old = *address;
+      do {
+        assumed = old;
+        old = atomicCAS(address, assumed, assumed ^ ran.u64);
+      } while  (assumed != old);
+      break;
+    case ATOMICTYPE_XOR:
+      atomicXor(&t[ran.u64 & (n - 1)].u32.x, ran.u32.x);
+      atomicXor(&t[ran.u64 & (n - 1)].u32.y, ran.u32.y);
+      break;
+    }
   }
 }
 
@@ -236,7 +250,7 @@ main(int argc, char *argv[])
   d_init<<<grid, thread>>>(n, d_t);
   cudaEventRecord(begin);
   cudaEventSynchronize(begin);
-  d_bench<<<grid, thread>>>(n, d_t);
+  d_bench<ATOMICTYPE_CAS><<<grid, thread>>>(n, d_t);
   cudaEventRecord(end);
   cudaEventSynchronize(end);
 
@@ -248,7 +262,7 @@ main(int argc, char *argv[])
   printf("Elapsed time = %.6f seconds.\n", time);
   double gups = 4 * n / (double) ms * 1.0e-6;
   printf("Giga Updates per second = %.6f GUP/s.\n", gups);
-  d_bench<<<grid, thread>>>(n, d_t);
+  d_bench<ATOMICTYPE_CAS><<<grid, thread>>>(n, d_t);
   void *p_error;
   cudaGetSymbolAddress(&p_error, d_error);
   cudaMemset(d_error, 0, sizeof(uint32_t));
