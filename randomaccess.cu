@@ -101,7 +101,7 @@ union benchtype {
   uint2 u32;
 };
 
-static __device__ uint64_t c_m2[64];
+static __constant__ uint64_t c_m2[64];
 static __device__ uint32_t d_error[1];
 
 static __global__ void
